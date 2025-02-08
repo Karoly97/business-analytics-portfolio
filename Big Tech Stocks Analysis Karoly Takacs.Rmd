@@ -1,0 +1,195 @@
+---
+title: "Big Tech Stocks Analysis"
+author: "Károly Takács"
+date: "2025-01-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This project analyses stock performance of major tech companies, focusing on risk metrics, statistical modeling, and predictive analysis. Using the TidyTuesday dataset (2023-02-07), the analysis includes stock price trends, volatility, correlations, and additional risk metrics such as Value at Risk (VaR) and Beta. External datasets are integrated, and advanced features such as custom themes, layered plots, Monte Carlo simulations, and a histogram of returns are added for an enriched presentation.
+
+# Loading Libraries
+```{r}
+library(data.table)
+library(ggplot2)
+library(tidytuesdayR)
+library(gganimate)
+library(transformr)
+library(stats)
+library(RColorBrewer)
+library(quantmod)
+library(zoo)
+```
+
+# Loading the Data
+```{r}
+tuesdata <- tidytuesdayR::tt_load('2023-02-07')
+big_tech_stock_prices <- tuesdata$big_tech_stock_prices
+big_tech_companies <- tuesdata$big_tech_companies
+
+stocks <- as.data.table(big_tech_stock_prices)
+companies <- as.data.table(big_tech_companies)
+head(stocks)
+```
+
+# Data Preparation and Filtering
+```{r}
+stocks <- stocks[date >= "2018-01-01" & !is.na(adj_close)]
+stocks[, date := as.Date(date)]
+```
+
+# Merging Datasets
+```{r}
+stocks <- merge(stocks, companies, by = "stock_symbol", all.x = TRUE)
+head(stocks)
+```
+
+# Aggregating Data
+```{r}
+average_prices <- stocks[, .(avg_price = mean(adj_close, na.rm = TRUE)), by = .(stock_symbol, company)]
+average_prices
+```
+
+# Adding Risk Metrics
+
+## Volatility 
+```{r}
+volatility <- stocks[, .(date, stock_symbol,rolling_vol = zoo::rollapply(adj_close, width = 20, FUN = sd, fill = NA)),by = stock_symbol]
+volatility
+```
+
+## Sharpe Ratio
+```{r}
+risk_free_rate <- 0.02 / 252
+stocks[, daily_return := c(NA, diff(log(adj_close))), by = stock_symbol]
+sharpe_ratios <- stocks[, .(sharpe_ratio = mean(daily_return, na.rm = TRUE) / sd(daily_return, na.rm = TRUE)), by = stock_symbol]
+sharpe_ratios
+```
+
+## Value at Risk (VaR)
+```{r}
+var_results <- stocks[, .(VaR_95 = quantile(daily_return, probs = 0.05, na.rm = TRUE)), by = stock_symbol]
+var_results
+```
+
+# Fetch MSCI World Index (URTH ETF) from Yahoo Finance
+```{r}
+
+getSymbols("URTH", src = "yahoo", from = "2018-01-01")
+msci_data <- as.data.table(URTH, keep.rownames = "date")
+msci_data[, date := as.Date(date)]
+setnames(msci_data,
+         old = c("URTH.Open", "URTH.High", "URTH.Low", "URTH.Close", "URTH.Volume", "URTH.Adjusted"),
+         new = c("open",      "high",      "low",      "close",      "volume",      "adjusted"))
+msci_data[, daily_return := adjusted / shift(adjusted) - 1]
+str(msci_data)
+head(msci_data)
+stocks <- merge(
+  stocks,
+  msci_data[, .(date, msci_return = daily_return)],
+  by = "date",
+  all.x = TRUE
+)
+
+head(stocks)
+```
+
+# Compute Beta for Each Stock
+```{r}
+beta_values <- stocks[!is.na(daily_return) & !is.na(msci_return), 
+  .(beta = cov(daily_return, msci_return, use = "complete.obs") / var(msci_return, na.rm = TRUE)), 
+  by = stock_symbol]
+print(beta_values)
+```
+
+# Visualizations: 
+
+## Line Chart: Closing Prices of 3 Stocks Over Time
+```{r}
+stocks_subset <- stocks[stock_symbol %in% c("AAPL", "MSFT", "GOOGL")]
+
+ggplot(stocks_subset, aes(x = date, y = adj_close, color = stock_symbol)) +
+  geom_line(size = 1) +
+  scale_color_brewer(palette = "Set1") +
+  labs(title = "Closing Prices of Selected Stocks Over Time", x = "Date", y = "Adjusted Closing Price") +
+  theme_minimal()
+```
+
+
+## Scatterplot: Price vs. Volume
+```{r}
+ggplot(stocks_subset, aes(x = volume, y = adj_close, color = company)) +
+  geom_point(alpha = 0.6) +
+  scale_color_brewer(palette = "Set1") +
+  labs(title = "Stock Price vs. Volume", x = "Volume", y = "Price") +
+  theme_minimal()
+```
+
+## Histogram of Daily Returns
+```{r}
+ggplot(stocks_subset, aes(x = daily_return, fill = company)) +
+  geom_histogram(bins = 30, alpha = 0.7, position = "identity", na.rm = TRUE) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(
+    title = "Distribution of Daily Returns by Company", 
+    x = "Daily Return", 
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+## Monte Carlo Simulation Apple 2022
+```{r}
+set.seed(123)
+n_simulations <- 1000
+
+# Define the time period (2022)
+start_date <- as.Date("2022-01-01")
+end_date <- as.Date("2022-12-31")
+
+# Filter data
+stocks_2022 <- stocks[stock_symbol == "AAPL" & date >= start_date & date <= end_date]
+
+
+# Use the FIRST price of 2022 as the reference
+initial_price <- head(stocks_2022$adj_close, 1)  
+mean_return <- mean(stocks_2022$daily_return, na.rm = TRUE)
+sd_return <- sd(stocks_2022$daily_return, na.rm = TRUE)
+n_days <- nrow(stocks_2022)  # Use the actual number of trading days in 2022
+
+# Simulation matrix
+simulated_prices <- matrix(NA, nrow = n_days, ncol = n_simulations)
+
+# Generate Monte Carlo simulations
+for (i in 1:n_simulations) {
+  simulated_prices[, i] <- initial_price * cumprod(exp(rnorm(n_days, mean_return, sd_return)))
+}
+
+# Convert to data.table
+simulated_data <- as.data.table(simulated_prices)
+simulated_data[, day := 1:.N]
+
+# Reshape data for ggplot
+simulated_long <- melt(simulated_data, id.vars = "day", variable.name = "simulation", value.name = "price")
+
+# Visualisation
+
+  ggplot() +
+    geom_line(data = simulated_long, aes(x = day, y = price, group = simulation), alpha = 0.1, color = "blue") +
+    geom_line(data = stocks_2022, aes(x = 1:n_days, y = adj_close), color = "red", size = 1) +
+    labs(title = "Monte Carlo Simulation of AAPL Stock Prices for 2022", 
+         subtitle = "Blue: Simulated Paths, Red: Actual Prices",
+         x = "Day", y = "Price") +
+    theme_minimal()
+```
+
+# Summary and Conclusion
+This analysis provides a comprehensive view of stock performance, risk metrics, predictive modeling, and future price simulations. The analysis demonstrates practical applications of risk management and stock price prediction, incorporating enriched datasets and visualizations.
+
+# Publication
+https://medium.com/@karoly.takacs97/big-tech-stocks-analysis-in-r-582606241579
