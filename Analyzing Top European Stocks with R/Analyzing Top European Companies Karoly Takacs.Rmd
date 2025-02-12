@@ -1,0 +1,355 @@
+---
+title: "Analyzing Top European Companies"
+author: "Károly Takács"
+date: "2025-02-08"
+output: html_document
+---
+
+# Introduction
+
+When people think about big stocks, they often jump to Big Tech in the United States. But Europe also
+boasts heavyweight corporations with a global footprint-such as LVMH, Siemens, Nestlé, ASML, and more.
+Understanding their price movements, correlations, and optimal portfolio allocations is crucial for:
+  - Risk management: Minimizing potential drawdowns by balancing exposure.
+  - Return optimization: Locating that elusive sweet spot of risk vs. reward.
+  - Market insights: Seeing how regional events influence these European giants.
+
+## Loading Libraries
+```{r load-packages, message=FALSE, warning=FALSE}
+library(sf)                 
+library(zoo)
+library(purrr)              
+library(plotly)              
+library(ggplot2)            
+library(ggrepel)         
+library(quantmod)         
+library(quadprog)          
+library(gganimate)          
+library(tidyverse)          
+library(lubridate)          
+library(tidygeocoder)      
+library(rnaturalearth)      
+library(PerformanceAnalytics)
+```
+
+
+## Map of Headquarters:
+
+```{r }
+# Prepare European country shapes
+europe_shapes <- ne_countries(scale = "medium", continent = "Europe", returnclass = "sf")
+
+# Define the mapping of companies, cities, and countries
+company_location <- tibble(
+  company = c("LVMH", "Siemens", "Nestlé", "ASML", "Roche", "TotalEnergies", "SAP", "Volkswagen", "BNP Paribas", "Airbus"),
+  city = c("Paris", "Munich", "Vevey", "Veldhoven", "Basel", "Courbevoie", "Walldorf", "Wolfsburg", "Paris", "Blagnac"),
+  country = c("France", "Germany", "Switzerland", "Netherlands", "Switzerland", "France", "Germany", "Germany", "France", "France")
+)
+
+# Geocode
+hq_locations <- company_location %>%
+  mutate(full_address = paste(city, country, sep = ", ")) %>%
+  geocode(address = full_address, method = "osm")
+
+# Count the number of companies in each country
+country_counts <- company_location %>%
+  count(country, name = "company_count")
+
+# Merge the country counts with European country shapes
+map_data <- europe_shapes %>%
+  filter(admin %in% country_counts$country) %>%
+  left_join(country_counts, by = c("admin" = "country"))
+
+# Plot the map
+ggplot(europe_shapes) +
+  geom_sf(fill = "gray95", color = "white") +
+  geom_sf(data = map_data, aes(fill = company_count), color = "black", alpha = 0.8) +
+  geom_point(data = hq_locations, aes(x = long, y = lat), color = "red", size = 1.5) +
+  geom_label_repel(data = hq_locations, aes(x = long, y = lat, label = company),
+                   size = 3, fontface = "bold") +
+  scale_fill_gradient(low = "lightblue", high = "darkblue", name = "Number of Companies by Country") +
+  labs(title = "Top European Companies HQ highlight", x = NULL, y = NULL) +
+  coord_sf(xlim = c(-10, 20), ylim = c(40, 55), expand = FALSE) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+## Stock Price Data from Yahoo Finance with quantmod:
+
+```{r }
+# Fetch stock prices for the top 10 European companies from Yahoo Finance
+getSymbols(c("MC.PA", "SIE.DE", "NESN.SW", "ASML.AS", "ROG.SW", 
+             "TTE.PA", "SAP.DE", "VOW3.DE", "BNP.PA", "AIR.PA"), 
+           src = "yahoo", from = "2020-01-01", to = Sys.Date())
+
+# Convert each stock to a data frame and rename columns
+stock_data_list <- list(
+  "MC.PA"    = fortify.zoo(Cl(`MC.PA`))    %>% rename(date = Index, lvmh_close       = `MC.PA.Close`),
+  "SIE.DE"   = fortify.zoo(Cl(`SIE.DE`))   %>% rename(date = Index, siemens_close    = `SIE.DE.Close`),
+  "NESN.SW"  = fortify.zoo(Cl(`NESN.SW`))  %>% rename(date = Index, nestle_close     = `NESN.SW.Close`),
+  "ASML.AS"  = fortify.zoo(Cl(`ASML.AS`))  %>% rename(date = Index, asml_close       = `ASML.AS.Close`),
+  "ROG.SW"   = fortify.zoo(Cl(`ROG.SW`))   %>% rename(date = Index, roche_close      = `ROG.SW.Close`),
+  "TTE.PA"   = fortify.zoo(Cl(`TTE.PA`))   %>% rename(date = Index, total_close      = `TTE.PA.Close`),
+  "SAP.DE"   = fortify.zoo(Cl(`SAP.DE`))   %>% rename(date = Index, sap_close        = `SAP.DE.Close`),
+  "VOW3.DE"  = fortify.zoo(Cl(`VOW3.DE`))  %>% rename(date = Index, volkswagen_close = `VOW3.DE.Close`),
+  "BNP.PA"   = fortify.zoo(Cl(`BNP.PA`))   %>% rename(date = Index, bnp_close        = `BNP.PA.Close`),
+  "AIR.PA"   = fortify.zoo(Cl(`AIR.PA`))   %>% rename(date = Index, airbus_close     = `AIR.PA.Close`)
+)
+
+# Merge all stock data into a single data frame
+europe_stock_data <- reduce(stock_data_list, full_join, by = "date") %>%
+  mutate(year = year(date), month = month(date))
+
+# Fill missing values using Last Observation Carried Forward (na.locf)
+europe_stock_data <- europe_stock_data %>%
+  mutate(across(ends_with("_close"), ~ na.locf(.x, na.rm = FALSE)))
+```
+
+## Interactive Line Plot of Closing Prices:
+
+```{r }
+# Transform data for interactive plot
+europe_stock_long <- europe_stock_data %>%
+  pivot_longer(cols = ends_with("_close"), names_to = "company", values_to = "price") %>%
+  filter(!is.na(price)) %>%
+  mutate(company = toupper(gsub("_close", "", company)))
+
+# Create an interactive stock price plot
+plot_ly(europe_stock_long, 
+        x = ~date, y = ~price, color = ~company, 
+        colors = c("blue", "orange", "green", "red", "purple", 
+                   "brown", "pink", "gray", "yellow", "cyan"), 
+        type = 'scatter', mode = 'lines') %>%
+  layout(
+    title = "Stock Price Trends: Top 10 European Companies",
+    xaxis = list(title = "Date"),
+    yaxis = list(title = "Price (EUR)"),
+    legend = list(title = list(text = "Company"))
+  )
+```
+
+
+## Rolling Volatility 30 day:
+
+```{r }
+# Calculate 30-day rolling volatility
+volatility_df <- europe_stock_data %>%
+  mutate(across(ends_with("_close"), 
+                ~ rollapply(.x, 30, sd, fill = NA, align = "right")))
+
+# Transform to long format
+volatility_long <- volatility_df %>%
+  pivot_longer(cols = ends_with("_close"), names_to = "company", values_to = "volatility") %>%
+  mutate(company = toupper(gsub("_close", "", company)))
+
+# Interactive rolling volatility plot
+plot_ly(volatility_long, 
+        x = ~date, y = ~volatility, color = ~company, 
+        colors = c("blue", "orange", "green", "red", "purple", 
+                   "brown", "pink", "gray", "yellow", "cyan"), 
+        type = 'scatter', mode = 'lines') %>%
+  layout(
+    title = "30-Day Rolling Volatility",
+    xaxis = list(title = "Date"),
+    yaxis = list(title = "Volatility (%)"),
+    legend = list(title = list(text = "Company"))
+  )
+```
+
+
+## Correlation Heatmap:
+
+```{r }
+# Filter for the most recent month
+most_recent_correlation <- europe_stock_data %>%
+  mutate(month_year = floor_date(date, "month")) %>%
+  filter(month_year == max(month_year)) %>%
+  reframe(across(ends_with("_close"), ~ (./lag(.) - 1) * 100, .names = "{.col}_return")) %>%
+  select(ends_with("_return")) %>%
+  select(where(~ sum(!is.na(.)) > 1))  # Remove columns with all NAs or constant values
+
+# Calculate the correlation matrix and tidy it
+tidy_matrix <- cor(most_recent_correlation, use = "pairwise.complete.obs") %>%
+  as_tibble(rownames = "company_1") %>%
+  pivot_longer(-company_1, names_to = "company_2", values_to = "correlation") %>%
+  mutate(
+    company_1 = toupper(gsub("_close_return", "", company_1)),
+    company_2 = toupper(gsub("_close_return", "", company_2))
+  )
+
+# Static heatmap
+ggplot(tidy_matrix, aes(x = company_1, y = company_2, fill = correlation)) +
+  geom_tile(color = "white") +
+  scale_fill_distiller(palette = "RdBu", limits = c(-1, 1)) +
+  labs(
+    title = "Correlation Heatmap",
+    x = "Companies",
+    y = "Companies",
+    fill = "Correlation"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
+  )
+```
+
+## Animated Monthly Correlation Heatmap:
+
+```{r }
+# Prepare monthly correlation matrices
+tidy_correlation <- europe_stock_data %>%
+  mutate(month_year = floor_date(date, "month")) %>%
+  group_by(month_year) %>%
+  reframe(across(ends_with("_close"), ~ (./lag(.) - 1) * 100, .names = "{.col}_return")) %>%
+  nest(data = -month_year) %>%
+  mutate(
+    correlation_matrix = map(data, ~ {
+      data_clean <- select(.x, ends_with("_return")) %>%
+        select(where(~ sum(!is.na(.)) > 1))
+      cor(data_clean, use = "pairwise.complete.obs")
+    }),
+    tidy_matrix = map(correlation_matrix, ~ as_tibble(.x, rownames = "company_1") %>%
+      pivot_longer(-company_1, names_to = "company_2", values_to = "correlation"))
+  ) %>%
+  select(month_year, tidy_matrix) %>%
+  unnest(tidy_matrix) %>%
+  mutate(
+    company_1   = toupper(gsub("_close_return", "", company_1)),
+    company_2   = toupper(gsub("_close_return", "", company_2)),
+    month_label = format(month_year, "%Y %B")  # "Year Month" label
+  )
+
+# Create the animated heatmap
+p <- ggplot(tidy_correlation, aes(x = company_1, y = company_2, fill = correlation)) +
+  geom_tile(color = "white") +
+  scale_fill_distiller(palette = "RdBu", limits = c(-1, 1)) +
+  labs(title = "Monthly Correlation Heatmap: {closest_state}", x = "", y = "", fill = "Correlation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  transition_states(month_label, transition_length = 4, state_length = 2) + 
+  ease_aes('linear')
+
+# To render:
+# animate(p, nframes = 150, fps = 10, width = 600, height = 500, renderer = gifski_renderer())
+```
+
+## Portfolio Analysis (Markowitz) Compute Daily Returns, Mean, and Covariance:
+
+```{r }
+# Calculate daily returns for all assets
+daily_returns <- europe_stock_data %>%
+  select(date, ends_with("_close")) %>%
+  mutate(across(ends_with("_close"), ~ (./lag(.) - 1))) %>%
+  filter(!is.na(rowMeans(select(., -date))))  # remove rows with all NAs
+
+# Compute average daily returns and covariance matrix
+mean_returns <- colMeans(daily_returns[-1], na.rm = TRUE)
+cov_matrix   <- cov(daily_returns[-1], use = "pairwise.complete.obs")
+
+# Annualize them (assuming ~252 trading days per year)
+mean_returns_annualized <- mean_returns * 252
+cov_matrix_annualized   <- cov_matrix * 252
+```
+
+## Generate Random Portfolios & Plot Efficient Frontier:
+
+```{r }
+set.seed(123)
+num_portfolios <- 5000
+
+portfolio_results <- replicate(num_portfolios, {
+  # Generate random weights for 10 assets
+  weights <- runif(10)
+  weights <- weights / sum(weights)  # Sum to 1
+  
+  # Calculate portfolio return and risk
+  expected_return <- sum(weights * mean_returns_annualized)
+  portfolio_risk  <- sqrt(t(weights) %*% cov_matrix_annualized %*% weights)
+  sharpe_ratio    <- expected_return / portfolio_risk
+  
+  c(expected_return, portfolio_risk, sharpe_ratio)
+})
+
+# Convert results to data frame
+portfolio_results <- as.data.frame(t(portfolio_results))
+colnames(portfolio_results) <- c("Return", "Risk", "Sharpe_Ratio")
+
+# Plot the Efficient Frontier with LOESS curve
+ggplot(portfolio_results, aes(x = Risk, y = Return)) +
+  geom_point(aes(color = Sharpe_Ratio), alpha = 0.5) +
+  geom_smooth(method = "loess", formula = y ~ x, color = "red", se = FALSE, linewidth = 1) +
+  scale_color_gradient(low = "blue", high = "green") +
+  labs(
+    title = "Efficient Frontier (Annualized Returns with LOESS Curve)",
+    x = "Portfolio Risk (Volatility, Annualized)",
+    y = "Expected Return (Annualized)",
+    color = "Sharpe Ratio"
+  ) +
+  theme_minimal()
+```
+
+## Interactive Efficient Frontier:
+
+```{r }
+# Fit LOESS model to the random portfolios
+loess_fit <- loess(Return ~ Risk, data = portfolio_results, span = 0.5)
+
+# Generate predicted values
+risk_seq <- seq(min(portfolio_results$Risk), max(portfolio_results$Risk), length.out = 200)
+smoothed_returns <- predict(loess_fit, newdata = data.frame(Risk = risk_seq))
+
+# Create interactive plot
+plot_ly() %>%
+  add_markers(
+    data = portfolio_results,
+    x = ~Risk, y = ~Return, color = ~Sharpe_Ratio,
+    type = 'scatter', mode = 'markers',
+    colors = colorRamp(c("blue", "green")),
+    marker = list(size = 6),
+    name = "Portfolios"
+  ) %>%
+  add_lines(
+    x = risk_seq, y = smoothed_returns, name = "LOESS Curve",
+    line = list(color = 'red', width = 2)
+  ) %>%
+  layout(
+    title = "Interactive Efficient Frontier with LOESS",
+    xaxis = list(title = "Portfolio Risk (Volatility, Annualized)"),
+    yaxis = list(title = "Expected Return (Annualized)"),
+    legend = list(orientation = "h", x = 0.3, y = -0.2)
+  )
+```
+
+```{r }
+# Quadratic Programming to find optimal weights
+Dmat <- 2 * cov_matrix_annualized
+dvec <- rep(0, ncol(cov_matrix_annualized))
+
+# Example constraints:
+# 1) Sum of weights = 1
+# 2) Each weight >= 0.05
+# 3) Each weight <= 0.20 
+Amat <- cbind(1, diag(1, ncol(cov_matrix_annualized)), -diag(1, ncol(cov_matrix_annualized)))
+bvec <- c(1, rep(0.05, ncol(cov_matrix_annualized)), rep(-0.20, ncol(cov_matrix_annualized)))
+
+result <- solve.QP(Dmat, dvec, Amat, bvec, meq = 1) 
+optimal_weights <- result$solution
+
+# Format the optimal weights
+optimal_weights_df <- data.frame(
+  Company        = toupper(gsub("_close", "", colnames(cov_matrix))),
+  Optimal_Weight = round(optimal_weights * 100, 2)
+)
+
+optimal_weights_df
+
+```
+
+## Summary and Conclusion 
+In this project, we walked through fetching data on Europe's top companies, plotting their locations, analyzing stock returns, and running a Markowitz optimization in R all in a few dozen lines of code.
+
+
+## Publication 
+https://medium.com/@karoly.takacs97/a-deep-dive-into-europes-top-10-stocks-with-r-1951f5c4e3c8
